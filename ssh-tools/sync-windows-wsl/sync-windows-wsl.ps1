@@ -2,26 +2,28 @@
 # Zero-config SSH sync (WSL → Windows)
 # ------------------------------
 
-# Detect default WSL distro
-$wslDistro = (wsl --list --quiet | Select-Object -First 1).Trim()
-if (-not $wslDistro) { throw "No WSL distro found." }
+param (
+    [string]$WslDistro = "Ubuntu"
+)
+
+Write-Host "Using WSL distro: $WslDistro"
 
 # Detect WSL username
-$wslUser = (wsl -d $wslDistro whoami).Trim()
+$wslUser = (wsl -d $WslDistro whoami).Trim()
 
-# Detect Windows username and SSH dir
+# Detect Windows username and SSH dirs
 $winUser = $env:USERNAME
 $sshWinDir = "C:\Users\$winUser\.ssh"
-$sshWslDir = "\\wsl$\$wslDistro\home\$wslUser\.ssh"
+$sshWslDir = "\\wsl$\$WslDistro\home\$wslUser\.ssh"
 
-Write-Host "WSL distro: $wslDistro"
+Write-Host "WSL distro: $WslDistro"
 Write-Host "WSL user:   $wslUser"
 Write-Host "Windows user: $winUser"
 
-# Backup existing Windows .ssh
+# Backup existing Windows .ssh dir if it exists
 if (Test-Path $sshWinDir) {
     $backupPath = "$sshWinDir.backup-$(Get-Date -Format yyyyMMdd-HHmmss)"
-    Rename-Item $sshWinDir $backupPath
+    Rename-Item -Path $sshWinDir -NewName $backupPath
     Write-Host "Backed up existing .ssh to $backupPath"
 }
 
@@ -29,7 +31,7 @@ if (Test-Path $sshWinDir) {
 New-Item -ItemType Directory -Path $sshWinDir | Out-Null
 
 # Path to WSL SSH config
-$wslConfigPath = "\\wsl$\$wslDistro\home\$wslUser\.ssh\config"
+$wslConfigPath = "\\wsl$\$WslDistro\home\$wslUser\.ssh\config"
 
 if (-not (Test-Path $wslConfigPath)) {
     throw "No SSH config found in WSL at $wslConfigPath"
@@ -42,11 +44,17 @@ $convertedLines = $configLines | ForEach-Object {
         $key = $matches[1]
         $path = $matches[2].Trim()
 
-        # Replace WSL ~/.ssh path with Windows .ssh path
-        $path = $path -replace "^~\/\.ssh\/", ($sshWinDir -replace '\\', '/') + '/'
-        $path = $path -replace "^/home/$wslUser/\.ssh/", ($sshWinDir -replace '\\', '/') + '/'
+        # Normalize slashes to forward for replacement
+        $path = $path -replace '\\', '/'
 
-        "$key $path"
+        # Replace WSL ~/.ssh and /home/user/.ssh prefixes with Windows .ssh path (using forward slashes)
+        $windowsPath = $sshWinDir -replace '\\', '/'
+
+        $path = $path -replace '^~\/\.ssh\/', "$windowsPath/"
+        $path = $path -replace "^/home/$wslUser/\.ssh/", "$windowsPath/"
+
+        # Add 4 spaces indentation for proper ssh config formatting
+        "    $key $path"
     }
     else {
         $_
@@ -55,7 +63,7 @@ $convertedLines = $configLines | ForEach-Object {
 
 # Save converted config to Windows
 $convertedConfigPath = "$sshWinDir\config"
-$convertedLines | Set-Content $convertedConfigPath -Encoding UTF8
+$convertedLines | Set-Content -Path $convertedConfigPath -Encoding UTF8
 Write-Host "Converted config saved to $convertedConfigPath"
 
 # Extract keys from converted config
@@ -63,12 +71,13 @@ $keyPaths = $convertedLines |
     ForEach-Object { if ($_ -match '^\s*IdentityFile\s+(.*)$') { $matches[1] } } |
     Sort-Object -Unique
 
-# Create symlinks for each key
+# Create symlinks for each key from WSL .ssh to Windows .ssh
 foreach ($keyPath in $keyPaths) {
     $keyName = Split-Path $keyPath -Leaf
     $src = Join-Path $sshWslDir $keyName
     $dst = Join-Path $sshWinDir $keyName
     if (Test-Path $src) {
+        # Use cmd /c mklink to create symbolic link; requires admin or developer mode enabled
         cmd /c mklink "$dst" "$src" | Out-Null
         Write-Host "Linked: $keyName"
     } else {
@@ -76,7 +85,7 @@ foreach ($keyPath in $keyPaths) {
     }
 }
 
-# Auto-add keys to Windows SSH agent
+# Add keys to Windows SSH agent
 foreach ($keyPath in $keyPaths) {
     & ssh-add $keyPath | Out-Null
 }
